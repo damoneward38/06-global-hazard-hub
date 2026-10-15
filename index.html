@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<link rel="icon" href="data:,">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Global Hazard Hub — Environmental Sensor Dashboard</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -48,6 +49,26 @@ body{font-family:'Inter','Segoe UI',system-ui,sans-serif;background:var(--bg);co
 .sidebar .stat-block .sb-label{font-size:10px;color:var(--muted);text-transform:uppercase}
 .sidebar .stat-block .sb-value{font-size:22px;font-weight:700;color:#fff;margin-top:2px;font-family:'Courier New',monospace}
 .leaflet-container{background:var(--bg)!important}
+
+
+/* Navigation views */
+.secondary-view{position:absolute;inset:0;z-index:3;overflow:auto;padding:24px;background:var(--bg)}
+.secondary-view h2{margin:0 0 8px;font-size:22px;color:#fff}
+.secondary-view .view-note{color:var(--muted);font-size:12px;margin-bottom:18px}
+.view-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:20px}
+.view-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+.view-card .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px}
+.view-card .value{font-size:24px;font-weight:700;margin-top:8px;color:#fff}
+.view-table{width:100%;border-collapse:collapse;background:var(--card);font-size:13px}
+.view-table th,.view-table td{padding:11px 12px;text-align:left;border-bottom:1px solid var(--border)}
+.view-table th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+.view-table td{color:var(--text)}
+.view-alert{padding:13px 15px;margin-bottom:9px;border:1px solid var(--border);border-radius:10px;background:var(--card)}
+.view-alert strong{color:#fff}
+.view-alert p{margin-top:5px;color:var(--muted);font-size:12px}
+.view-empty{padding:18px;border:1px dashed var(--border);border-radius:10px;color:var(--muted)}
+.view-back{margin-top:18px;border:1px solid var(--border);border-radius:8px;background:#172033;color:var(--text);padding:10px 14px;cursor:pointer}
+
 </style>
 </head>
 <body>
@@ -55,7 +76,7 @@ body{font-family:'Inter','Segoe UI',system-ui,sans-serif;background:var(--bg);co
   <header class="topbar">
     <h1>Global Hazard <span>Hub</span></h1>
     <div class="env-badge">GLOBAL MONITORING</div>
-    <div class="live-dot"><div class="dot"></div> Live</div>
+    <div class="live-dot"><div class="dot"></div> <span id="dataStatus">SIMULATED DEMO</span></div>
   </header>
 
   <nav class="sidebar">
@@ -138,6 +159,7 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
 }).addTo(map);
 
 // Simulated hazard events
+window.hazardDataSource = 'Simulated demo data';
 const hazardTypes = ['earthquake','tornado','hurricane','flood','wildfire','tsunami'];
 const hazardColors = {earthquake:'#ef4444',tornado:'#f59e0b',hurricane:'#3b82f6',flood:'#06b6d4',wildfire:'#f97316',tsunami:'#8b5cf6'};
 const hazardIcons = {earthquake:'🌍',tornado:'🌪️',hurricane:'🌀',flood:'🌊',wildfire:'🔥',tsunami:'🌊'};
@@ -198,9 +220,15 @@ async function fetchEvents() {
     const res = await fetch('/api/events?limit=200');
     if (res.ok) {
       hazardEvents = await res.json();
+      const status = document.getElementById('dataStatus');
+      if (status) status.textContent = 'LIVE API';
+      window.hazardDataSource = 'Live API';
     } else { throw new Error('API unavailable'); }
   } catch (e) {
-    // Simulate new events
+    // Clearly mark generated events as demo data when the backend is unavailable.
+    const status = document.getElementById('dataStatus');
+    if (status) status.textContent = 'SIMULATED DEMO';
+    window.hazardDataSource = 'Simulated demo data';
     hazardEvents = generateHazardEvents(200);
     // Slightly move some markers
     hazardEvents.forEach(evt => {
@@ -272,11 +300,75 @@ setInterval(updateStats, 5000);
 setInterval(pushAlert, 12000);
 updateSensorData();
 
-// Sidebar nav interaction
-document.querySelectorAll('.nav-item').forEach(item => {
-  item.addEventListener('click', () => {
-    document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
-    item.classList.add('active');
+// Sidebar navigation: each item opens a real view instead of only changing its highlight.
+const mainMap = document.getElementById('map');
+const mapWidgets = document.querySelector('.map-overlay');
+const riskBadge = document.getElementById('riskBadge');
+const alertPanel = document.getElementById('alertPanel');
+const secondaryView = document.createElement('section');
+secondaryView.className = 'secondary-view';
+secondaryView.id = 'secondaryView';
+secondaryView.hidden = true;
+secondaryView.setAttribute('aria-live', 'polite');
+document.querySelector('.content').appendChild(secondaryView);
+
+function viewEscape(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function eventRows() {
+  return hazardEvents.slice(0, 30).map(evt => '<tr><td>' + viewEscape(evt.type) + '</td><td>' +
+    viewEscape(evt.magnitude) + '</td><td>' + viewEscape(Number(evt.lat).toFixed(2)) + ', ' +
+    viewEscape(Number(evt.lon).toFixed(2)) + '</td><td>' + viewEscape(evt.id) + '</td></tr>').join('');
+}
+function showSecondary(title, body) {
+  secondaryView.innerHTML = '<h2>' + title + '</h2><p class="view-note">Source: ' +
+    viewEscape(window.hazardDataSource || 'Simulated demo data') +
+    ' · This static export does not confirm live emergency-service connectivity.</p>' + body +
+    '<button class="view-back" type="button" id="returnToGlobe">Return to Globe View</button>';
+  secondaryView.hidden = false;
+  document.getElementById('returnToGlobe').addEventListener('click', () => switchView(0));
+}
+function switchView(index) {
+  document.querySelectorAll('.nav-item').forEach((item, i) => {
+    item.classList.toggle('active', i === index);
+    item.setAttribute('aria-current', i === index ? 'page' : 'false');
+  });
+  const onGlobe = index === 0;
+  mainMap.style.display = onGlobe ? 'block' : 'none';
+  mapWidgets.style.display = onGlobe ? 'flex' : 'none';
+  riskBadge.style.display = onGlobe ? 'inline-block' : 'none';
+  alertPanel.style.display = onGlobe ? 'flex' : 'none';
+  secondaryView.hidden = onGlobe;
+  if (onGlobe) {
+    if (typeof map !== 'undefined' && typeof map.invalidateSize === 'function') map.invalidateSize();
+    return;
+  }
+  if (index === 1) {
+    showSecondary('Dashboard', '<div class="view-cards">' +
+      '<div class="view-card"><div class="label">Events shown</div><div class="value">' + hazardEvents.length + '</div></div>' +
+      '<div class="view-card"><div class="label">Sensors (demo)</div><div class="value">247</div></div>' +
+      '<div class="view-card"><div class="label">Risk estimate</div><div class="value">' + currentRisk + '%</div></div>' +
+      '<div class="view-card"><div class="label">Data source</div><div class="value" style="font-size:16px">' + viewEscape(window.hazardDataSource || 'Simulated demo data') + '</div></div></div>');
+  } else if (index === 2) {
+    showSecondary('Sensor Data', '<table class="view-table"><thead><tr><th>Hazard type</th><th>Magnitude</th><th>Coordinates</th><th>Event ID</th></tr></thead><tbody>' +
+      (hazardEvents.length ? eventRows() : '<tr><td colspan="4">No sensor events available.</td></tr>') + '</tbody></table>');
+  } else if (index === 3) {
+    const events = hazardEvents.slice(0, 20);
+    showSecondary('Alerts', events.length ? events.map(evt => '<article class="view-alert"><strong>' +
+      viewEscape(hazardIcons[evt.type] || '⚠️') + ' ' + viewEscape(evt.type) + ' · Magnitude ' +
+      viewEscape(evt.magnitude) + '</strong><p>Event ' + viewEscape(evt.id) + ' · Coordinates ' +
+      viewEscape(Number(evt.lat).toFixed(2)) + ', ' + viewEscape(Number(evt.lon).toFixed(2)) + '</p></article>').join('') :
+      '<div class="view-empty">No alerts available.</div>');
+  } else {
+    showSecondary('AR Viewer', '<div class="view-empty"><strong>AR preview unavailable in this static build.</strong><p style="margin-top:8px">The viewer needs a camera-enabled AR client and a connected sensor feed. This page is available, but no AR session is falsely reported as running.</p></div>');
+  }
+}
+document.querySelectorAll('.nav-item').forEach((item, index) => {
+  item.setAttribute('role', 'button');
+  item.setAttribute('tabindex', '0');
+  item.addEventListener('click', () => switchView(index));
+  item.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); switchView(index); }
   });
 });
 </script>

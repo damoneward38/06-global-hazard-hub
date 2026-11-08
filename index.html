@@ -76,7 +76,7 @@ body{font-family:'Inter','Segoe UI',system-ui,sans-serif;background:var(--bg);co
   <header class="topbar">
     <h1>Global Hazard <span>Hub</span></h1>
     <div class="env-badge">GLOBAL MONITORING</div>
-    <div class="live-dot"><div class="dot"></div> <span id="dataStatus">SIMULATED DEMO</span></div>
+    <div class="live-dot"><div class="dot"></div> <span id="dataStatus">CONNECTING</span></div>
   </header>
 
   <nav class="sidebar">
@@ -158,31 +158,28 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
   subdomains: 'abcd', maxZoom: 19
 }).addTo(map);
 
-// Simulated hazard events
-window.hazardDataSource = 'Simulated demo data';
-const hazardTypes = ['earthquake','tornado','hurricane','flood','wildfire','tsunami'];
+// Live hazard feed state
+window.hazardDataSource = 'Connecting to live feed…';
 const hazardColors = {earthquake:'#ef4444',tornado:'#f59e0b',hurricane:'#3b82f6',flood:'#06b6d4',wildfire:'#f97316',tsunami:'#8b5cf6'};
 const hazardIcons = {earthquake:'🌍',tornado:'🌪️',hurricane:'🌀',flood:'🌊',wildfire:'🔥',tsunami:'🌊'};
 
-function generateHazardEvents(n) {
-  const events = [];
-  for (let i = 0; i < n; i++) {
-    const type = hazardTypes[Math.floor(Math.random() * hazardTypes.length)];
-    events.push({
-      id: 'evt-' + i,
-      type: type,
-      lat: (Math.random() * 140) - 70,
-      lon: (Math.random() * 360) - 180,
-      magnitude: (Math.random() * 8 + 1).toFixed(1),
-      timestamp: Date.now() - Math.floor(Math.random() * 300000),
-      pressure: (Math.random() * 50 + 980).toFixed(1),
-      wind: Math.floor(Math.random() * 200)
-    });
-  }
-  return events;
+async function fetchUsgsEvents() {
+  const res = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson', { cache: 'no-store' });
+  if (!res.ok) throw new Error('USGS ' + res.status);
+  const data = await res.json();
+  return (data.features || []).slice(0, 200).map(f => ({
+    id: f.id,
+    type: 'earthquake',
+    lat: f.geometry.coordinates[1],
+    lon: f.geometry.coordinates[0],
+    magnitude: (f.properties.mag == null ? 0 : f.properties.mag).toFixed(1),
+    timestamp: f.properties.time,
+    pressure: '—',
+    wind: '—'
+  }));
 }
 
-let hazardEvents = generateHazardEvents(200);
+let hazardEvents = [];
 let markers = [];
 
 function renderMarkers() {
@@ -225,16 +222,16 @@ async function fetchEvents() {
       window.hazardDataSource = 'Live API';
     } else { throw new Error('API unavailable'); }
   } catch (e) {
-    // Clearly mark generated events as demo data when the backend is unavailable.
     const status = document.getElementById('dataStatus');
-    if (status) status.textContent = 'SIMULATED DEMO';
-    window.hazardDataSource = 'Simulated demo data';
-    hazardEvents = generateHazardEvents(200);
-    // Slightly move some markers
-    hazardEvents.forEach(evt => {
-      evt.lat += (Math.random() - .5) * .5;
-      evt.lon += (Math.random() - .5) * .5;
-    });
+    try {
+      hazardEvents = await fetchUsgsEvents();
+      if (status) status.textContent = 'USGS LIVE';
+      window.hazardDataSource = 'USGS earthquake feed (live)';
+    } catch (usgsError) {
+      if (status) status.textContent = 'OFFLINE';
+      window.hazardDataSource = 'Offline — no live feed available';
+      hazardEvents = [];
+    }
   }
   renderMarkers();
   updateStats();
@@ -246,6 +243,44 @@ function fetchSensorData() {
 }
 
 let currentRisk = 42;
+let riskBusy = false;
+function applyRisk(risk, source) {
+  currentRisk = risk;
+  document.getElementById('aiRisk').textContent = risk + '%';
+  const badge = document.getElementById('riskBadge');
+  const riskClass = risk > 75 ? 'high' : risk > 50 ? 'medium' : 'low';
+  badge.className = 'risk-badge ' + riskClass;
+  badge.textContent = 'Risk: ' + risk + '%' + (source ? ' · ' + source : '');
+  document.getElementById('riskLevel').textContent = risk > 75 ? 'CRITICAL' : risk > 50 ? 'MODERATE' : 'LOW';
+  document.getElementById('riskLevel').style.color = risk > 75 ? 'var(--red)' : risk > 50 ? 'var(--orange)' : 'var(--green)';
+}
+async function updateRiskWithAI(data) {
+  if (riskBusy) return;
+  riskBusy = true;
+  const prompt = 'Environmental reading: temperature ' + data.temp + ' C, pH ' + data.pH + ', salinity ' + data.salinity +
+    ' PSU. Active hazard events: ' + hazardEvents.length + '. Reply with only an integer from 0 to 100 representing overall hazard risk.';
+  try {
+    let text = '';
+    if (window.OllamaAI && window.OllamaAI.chat) {
+      text = await window.OllamaAI.chat([{ role: 'user', content: prompt }], { model: 'llama3.2', max_tokens: 8 });
+    } else {
+      const res = await fetch('http://localhost:8780/api/ai/chat', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: prompt }], stream: false, model: 'llama3.2', options: { num_predict: 8 } })
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+      text = body.message ? body.message.content : '';
+    }
+    const match = String(text).match(/\d{1,3}/);
+    if (match) applyRisk(Math.min(100, Math.max(0, parseInt(match[0], 10))), 'ollama');
+  } catch (error) {
+    const badge = document.getElementById('riskBadge');
+    if (badge) badge.textContent = 'Risk AI offline';
+  } finally {
+    riskBusy = false;
+  }
+}
 function updateSensorData() {
   const data = fetchSensorData();
   document.getElementById('envTemp').textContent = data.temp + '°C';
@@ -255,16 +290,7 @@ function updateSensorData() {
     '<div class="sensor-card"><div class="sv" style="color:var(--red)">' + data.temp + '</div><div class="sl">Temp °C</div></div>' +
     '<div class="sensor-card"><div class="sv" style="color:var(--cyan)">' + data.pH + '</div><div class="sl">pH</div></div>' +
     '<div class="sensor-card"><div class="sv" style="color:var(--accent)">' + data.salinity + '</div><div class="sl">Salinity</div></div>';
-  // Simulate AI risk prediction
-  const risk = Math.floor(Math.random() * 30 + 30);
-  currentRisk = risk;
-  document.getElementById('aiRisk').textContent = risk + '%';
-  const badge = document.getElementById('riskBadge');
-  const riskClass = risk > 75 ? 'high' : risk > 50 ? 'medium' : 'low';
-  badge.className = 'risk-badge ' + riskClass;
-  badge.textContent = 'Risk: ' + risk + '%';
-  document.getElementById('riskLevel').textContent = risk > 75 ? 'CRITICAL' : risk > 50 ? 'MODERATE' : 'LOW';
-  document.getElementById('riskLevel').style.color = risk > 75 ? 'var(--red)' : risk > 50 ? 'var(--orange)' : 'var(--green)';
+  updateRiskWithAI(data);
 }
 
 function updateStats() {
@@ -322,7 +348,7 @@ function eventRows() {
 }
 function showSecondary(title, body) {
   secondaryView.innerHTML = '<h2>' + title + '</h2><p class="view-note">Source: ' +
-    viewEscape(window.hazardDataSource || 'Simulated demo data') +
+    viewEscape(window.hazardDataSource || 'Unknown') +
     ' · This static export does not confirm live emergency-service connectivity.</p>' + body +
     '<button class="view-back" type="button" id="returnToGlobe">Return to Globe View</button>';
   secondaryView.hidden = false;
@@ -348,7 +374,7 @@ function switchView(index) {
       '<div class="view-card"><div class="label">Events shown</div><div class="value">' + hazardEvents.length + '</div></div>' +
       '<div class="view-card"><div class="label">Sensors (demo)</div><div class="value">247</div></div>' +
       '<div class="view-card"><div class="label">Risk estimate</div><div class="value">' + currentRisk + '%</div></div>' +
-      '<div class="view-card"><div class="label">Data source</div><div class="value" style="font-size:16px">' + viewEscape(window.hazardDataSource || 'Simulated demo data') + '</div></div></div>');
+      '<div class="view-card"><div class="label">Data source</div><div class="value" style="font-size:16px">' + viewEscape(window.hazardDataSource || 'Unknown') + '</div></div></div>');
   } else if (index === 2) {
     showSecondary('Sensor Data', '<table class="view-table"><thead><tr><th>Hazard type</th><th>Magnitude</th><th>Coordinates</th><th>Event ID</th></tr></thead><tbody>' +
       (hazardEvents.length ? eventRows() : '<tr><td colspan="4">No sensor events available.</td></tr>') + '</tbody></table>');

@@ -88,12 +88,12 @@ body{font-family:'Inter','Segoe UI',system-ui,sans-serif;background:var(--bg);co
 
     <div class="section-label">System Stats</div>
     <div class="stat-block">
-      <div class="sb-label">Active Sensors</div>
-      <div class="sb-value" id="sensorCount">247</div>
+      <div class="sb-label">Data Source</div>
+      <div class="sb-value" id="sensorCount" style="font-size:14px">Connecting…</div>
     </div>
     <div class="stat-block">
       <div class="sb-label">Events Today</div>
-      <div class="sb-value" id="eventCount">1,842</div>
+      <div class="sb-value" id="eventCount">—</div>
     </div>
     <div class="stat-block">
       <div class="sb-label">Risk Level</div>
@@ -112,9 +112,9 @@ body{font-family:'Inter','Segoe UI',system-ui,sans-serif;background:var(--bg);co
 
     <div class="section-label">Latest Sensor Reading</div>
     <div class="sensor-grid" id="sensorGrid">
-      <div class="sensor-card"><div class="sv" style="color:var(--red)">27.3</div><div class="sl">Temp °C</div></div>
-      <div class="sensor-card"><div class="sv" style="color:var(--cyan)">8.2</div><div class="sl">pH</div></div>
-      <div class="sensor-card"><div class="sv" style="color:var(--accent)">35.0</div><div class="sl">Salinity</div></div>
+      <div class="sensor-card"><div class="sv" style="color:var(--red)">—</div><div class="sl">Temp °C</div></div>
+      <div class="sensor-card"><div class="sv" style="color:var(--cyan)">—</div><div class="sl">Wind km/h</div></div>
+      <div class="sensor-card"><div class="sv" style="color:var(--accent)">—</div><div class="sl">Humidity %</div></div>
     </div>
   </nav>
 
@@ -129,14 +129,14 @@ body{font-family:'Inter','Segoe UI',system-ui,sans-serif;background:var(--bg);co
         <div class="wlabel">Temperature</div>
       </div>
       <div class="widget">
-        <div class="wtitle">Ocean pH</div>
-        <div class="wvalue" id="envPH">8.2</div>
-        <div class="wlabel">Acidity Index</div>
+        <div class="wtitle">Wind Speed</div>
+        <div class="wvalue" id="envPH">—</div>
+        <div class="wlabel">Surface wind (km/h)</div>
       </div>
       <div class="widget">
-        <div class="wtitle">Salinity</div>
-        <div class="wvalue" id="envSal">35 PSU</div>
-        <div class="wlabel">Practical Salinity Units</div>
+        <div class="wtitle">Humidity</div>
+        <div class="wvalue" id="envSal">—</div>
+        <div class="wlabel">Relative humidity (%)</div>
       </div>
       <div class="widget">
         <div class="wtitle">AI Risk Assessment</div>
@@ -234,16 +234,18 @@ async function fetchEvents() {
     }
   }
   renderMarkers();
+  hazardEvents.slice(0, 3).forEach(pushEventAlert);
   updateStats();
 }
 
-// Simulated sensor data stream (noaa + custom sensors)
-function fetchSensorData() {
-  return { temp: (25 + Math.random() * 6).toFixed(1), pH: (7.5 + Math.random() * 1.5).toFixed(1), salinity: (32 + Math.random() * 6).toFixed(1) };
-}
-
-let currentRisk = 42;
+let currentRisk = 0;
 let riskBusy = false;
+
+function heuristicRisk() {
+  const maxMagnitude = hazardEvents.reduce((max, event) => Math.max(max, Number(event.magnitude) || 0), 0);
+  const count = hazardEvents.length;
+  return Math.min(100, Math.max(0, Math.round(maxMagnitude * 9 + Math.log2(count + 1) * 4)));
+}
 function applyRisk(risk, source) {
   currentRisk = risk;
   document.getElementById('aiRisk').textContent = risk + '%';
@@ -257,73 +259,82 @@ function applyRisk(risk, source) {
 async function updateRiskWithAI(data) {
   if (riskBusy) return;
   riskBusy = true;
-  const prompt = 'Environmental reading: temperature ' + data.temp + ' C, pH ' + data.pH + ', salinity ' + data.salinity +
-    ' PSU. Active hazard events: ' + hazardEvents.length + '. Reply with only an integer from 0 to 100 representing overall hazard risk.';
+  const prompt = 'Environmental reading: temperature ' + data.temp + ' C, wind ' + data.wind + ' km/h, humidity ' + data.humidity +
+    ' percent. Active USGS earthquake events: ' + hazardEvents.length + '. Reply with only an integer from 0 to 100 representing overall hazard risk.';
   try {
     let text = '';
-    if (window.OllamaAI && window.OllamaAI.chat) {
-      text = await window.OllamaAI.chat([{ role: 'user', content: prompt }], { model: 'llama3.2', max_tokens: 8 });
+    if (window.PortfolioBackend && window.PortfolioBackend.chat) {
+      const result = await window.PortfolioBackend.chat([{ role: 'user', content: prompt }], { model: 'llama3.2' });
+      text = result.text || '';
     } else {
-      const res = await fetch('http://localhost:8780/api/ai/chat', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: prompt }], stream: false, model: 'llama3.2', options: { num_predict: 8 } })
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
-      text = body.message ? body.message.content : '';
+      throw new Error('Shared AI integration unavailable');
     }
     const match = String(text).match(/\d{1,3}/);
     if (match) applyRisk(Math.min(100, Math.max(0, parseInt(match[0], 10))), 'ollama');
+    else applyRisk(heuristicRisk(), 'heuristic');
   } catch (error) {
-    const badge = document.getElementById('riskBadge');
-    if (badge) badge.textContent = 'Risk AI offline';
+    applyRisk(heuristicRisk(), 'heuristic');
   } finally {
     riskBusy = false;
   }
 }
-function updateSensorData() {
-  const data = fetchSensorData();
-  document.getElementById('envTemp').textContent = data.temp + '°C';
-  document.getElementById('envPH').textContent = data.pH;
-  document.getElementById('envSal').textContent = data.salinity + ' PSU';
-  document.getElementById('sensorGrid').innerHTML =
-    '<div class="sensor-card"><div class="sv" style="color:var(--red)">' + data.temp + '</div><div class="sl">Temp °C</div></div>' +
-    '<div class="sensor-card"><div class="sv" style="color:var(--cyan)">' + data.pH + '</div><div class="sl">pH</div></div>' +
-    '<div class="sensor-card"><div class="sv" style="color:var(--accent)">' + data.salinity + '</div><div class="sl">Salinity</div></div>';
-  updateRiskWithAI(data);
+
+async function updateSensorData() {
+  const backend = window.PortfolioBackend;
+  if (!backend || typeof backend.weather !== 'function') {
+    document.getElementById('envTemp').textContent = '—';
+    document.getElementById('envPH').textContent = '—';
+    document.getElementById('envSal').textContent = '—';
+    updateRiskWithAI({ temp: '—', wind: '—', humidity: '—' });
+    return;
+  }
+  const center = map.getCenter();
+  try {
+    const weather = await backend.weather(center.lat, center.lng);
+    const data = {
+      temp: Number(weather.temperature).toFixed(1),
+      wind: Number(weather.windSpeed).toFixed(1),
+      humidity: String(weather.humidity)
+    };
+    document.getElementById('envTemp').textContent = data.temp + '°C';
+    document.getElementById('envPH').textContent = data.wind;
+    document.getElementById('envSal').textContent = data.humidity + '%';
+    document.getElementById('sensorGrid').innerHTML =
+      '<div class="sensor-card"><div class="sv" style="color:var(--red)">' + data.temp + '</div><div class="sl">Temp °C</div></div>' +
+      '<div class="sensor-card"><div class="sv" style="color:var(--cyan)">' + data.wind + '</div><div class="sl">Wind km/h</div></div>' +
+      '<div class="sensor-card"><div class="sv" style="color:var(--accent)">' + data.humidity + '</div><div class="sl">Humidity %</div></div>';
+    updateRiskWithAI(data);
+  } catch (error) {
+    document.getElementById('envTemp').textContent = '—';
+    document.getElementById('envPH').textContent = '—';
+    document.getElementById('envSal').textContent = '—';
+    applyRisk(heuristicRisk(), 'heuristic');
+  }
 }
 
 function updateStats() {
-  document.getElementById('sensorCount').textContent = Math.floor(200 + Math.random() * 100);
-  const count = parseInt(document.getElementById('eventCount').textContent.replace(',','')) || 1842;
-  document.getElementById('eventCount').textContent = (count + Math.floor(Math.random() * 20)).toLocaleString();
+  document.getElementById('sensorCount').textContent = window.hazardDataSource === 'Live API' ? 'LOCAL API' : window.hazardDataSource === 'USGS earthquake feed (live)' ? 'USGS' : 'OFFLINE';
+  document.getElementById('eventCount').textContent = hazardEvents.length.toLocaleString();
 }
 
-// Push alerts (simulated)
-const alertTypes = ['earthquake','tornado','hurricane','flood','wildfire'];
-function pushAlert() {
-  const type = alertTypes[Math.floor(Math.random() * alertTypes.length)];
+const seenAlerts = new Set();
+function pushEventAlert(event) {
+  if (!event || seenAlerts.has(event.id)) return;
+  seenAlerts.add(event.id);
   const panel = document.getElementById('alertPanel');
   const chip = document.createElement('div');
   chip.className = 'alert-chip';
-  chip.innerHTML = '<span style="font-size:16px">' + hazardIcons[type] + '</span>' +
-    '<div><div class="atype">' + type.toUpperCase() + '</div><div class="adetail">Magnitude ' + (Math.random()*8+1).toFixed(1) + '</div></div>' +
-    '<div class="atime">just now</div>';
+  chip.innerHTML = '<span style="font-size:16px">' + (hazardIcons[event.type] || '⚠️') + '</span>' +
+    '<div><div class="atype">' + String(event.type).toUpperCase() + '</div><div class="adetail">Magnitude ' + event.magnitude + '</div></div>' +
+    '<div class="atime">' + new Date(event.timestamp).toLocaleTimeString() + '</div>';
   panel.prepend(chip);
   if (panel.children.length > 5) panel.removeChild(panel.lastChild);
-  setTimeout(() => { if (chip.parentNode) chip.remove(); }, 15000);
 }
-
-// Initial alerts
-setTimeout(() => pushAlert(), 1000);
-setTimeout(() => pushAlert(), 3000);
-setTimeout(() => pushAlert(), 5500);
 
 // Periodic updates
 setInterval(fetchEvents, 15000);
 setInterval(updateSensorData, 10000);
 setInterval(updateStats, 5000);
-setInterval(pushAlert, 12000);
 updateSensorData();
 
 // Sidebar navigation: each item opens a real view instead of only changing its highlight.
